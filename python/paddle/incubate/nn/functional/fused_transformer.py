@@ -1058,12 +1058,6 @@ def fused_multi_transformer(
             ln_biases,
             qkv_weights,
             qkv_biases,
-            cache_kvs,
-            pre_caches,
-            rotary_embs,
-            time_step,
-            seq_lens,
-            attn_mask,
             linear_weights,
             linear_biases,
             ffn_ln_scales,
@@ -1073,6 +1067,11 @@ def fused_multi_transformer(
             ffn2_weights,
             ffn2_biases,
             cache_kvs,
+            pre_caches,
+            rotary_embs,
+            time_step,
+            seq_lens,
+            attn_mask,
             'pre_layer_norm',
             pre_layer_norm,
             'epsilon',
@@ -1083,10 +1082,10 @@ def fused_multi_transformer(
             rotary_emb_dims,
             'is_test',
             not training,
-            'dropout_implementation',
-            mode,
             'act_method',
             activation,
+            'dropout_implementation',
+            mode,
             'trans_qkvw',
             trans_qkvw,
             'ring_id',
@@ -1109,22 +1108,12 @@ def fused_multi_transformer(
         # set inputs
         inputs = {}
         inputs['X'] = [x]
-        inputs['LnScale'] = ln_scales
-        inputs['LnBias'] = ln_biases
-        inputs['QKVW'] = qkv_weights
+        inputs['LnScales'] = ln_scales
+        inputs['LnBiases'] = ln_biases
+        inputs['qkvWeights'] = qkv_weights
         if qkv_biases is not None:
-            inputs['QKVBias'] = qkv_biases
-        if cache_kvs is not None:
-            assert len(cache_kvs) == len(qkv_weights)
-            inputs['CacheKV'] = cache_kvs
-            if time_step is not None:
-                inputs['TimeStep'] = time_step
-        if pre_caches is not None:
-            inputs['PreCaches'] = pre_caches
-        if rotary_emb_dims > 0:
-            inputs['RotaryPosEmb'] = rotary_embs
-        inputs['SeqLengths'] = seq_lens
-        inputs['SrcMask'] = attn_mask
+            inputs['QKVBiases'] = qkv_biases
+
         inputs['OutLinearW'] = linear_weights
         if linear_biases is not None:
             inputs['OutLinearBias'] = linear_biases
@@ -1137,7 +1126,17 @@ def fused_multi_transformer(
         inputs['FFN2Weight'] = ffn2_weights
         if ffn2_biases is not None:
             inputs['FFN2Bias'] = ffn2_biases
-
+        if cache_kvs is not None:
+            assert len(cache_kvs) == len(qkv_weights)
+            inputs['CacheKVs'] = cache_kvs
+            if time_step is not None:
+                inputs['TimeStep'] = time_step
+        if pre_caches is not None:
+            inputs['PreCaches'] = pre_caches
+        if rotary_emb_dims > 0:
+            inputs['RotaryPosEmb'] = rotary_embs
+        inputs['SeqLengths'] = seq_lens
+        inputs['AttnMask'] = attn_mask
         # set attrs
         attrs = {
             'pre_layer_norm': pre_layer_norm,

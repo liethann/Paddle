@@ -1189,6 +1189,51 @@ void FusedGemmEpilogueGradInferMeta(const MetaTensor& x,
   }
 }
 
+void FusedMultiTransformerInferMeta(
+    const MetaTensor& x,
+    const std::vector<const MetaTensor*>& ln_scales,
+    const std::vector<const MetaTensor*>& ln_biases,
+    const std::vector<const MetaTensor*>& qkv_weights,
+    const std::vector<const MetaTensor*>& qkv_biases,
+    const std::vector<const MetaTensor*>& linear_weights,
+    const std::vector<const MetaTensor*>& linear_biases,
+    const std::vector<const MetaTensor*>& ffn_ln_scales,
+    const std::vector<const MetaTensor*>& ffn_ln_biases,
+    const std::vector<const MetaTensor*>& ffn1_weights,
+    const std::vector<const MetaTensor*>& ffn1_biases,
+    const std::vector<const MetaTensor*>& ffn2_weights,
+    const std::vector<const MetaTensor*>& ffn2_biases,
+    const std::vector<const MetaTensor*>& cache_kvs,
+    const std::vector<const MetaTensor*>& pre_caches,
+    const MetaTensor& rotary_pos_emb,
+    const MetaTensor& time_step,
+    const MetaTensor& seq_lengths,
+    const MetaTensor& attn_mask,
+    bool pre_layer_norm,
+    float epsilon,
+    float dropout_rate,
+    int rotary_emb_dims,
+    bool is_test,
+    const std::string& act_method,
+    const std::string& dropout_implementation,
+    bool trans_qkvw,
+    int ring_id,
+    std::vector<MetaTensor*> cache_kv_outs,
+    MetaTensor* out) {
+  out->set_dims(x.dims());
+  out->set_dtype(x.dtype());
+
+  for (size_t i = 0; i < cache_kvs.size(); i++) {
+    if (cache_kv_outs[i] != nullptr) {
+      cache_kv_outs[i]->set_dims(cache_kvs[i]->dims());
+      cache_kv_outs[i]->share_lod(*cache_kvs[i]);
+      if (!(cache_kv_outs[i]->is_same_tensor(*cache_kvs[i]))) {
+        cache_kv_outs[i]->set_dtype(cache_kvs[i]->dtype());
+      }
+    }
+  }
+}
+
 void FusedMultiTransformerXpuInferMeta(
     const MetaTensor& x,
     const std::vector<const MetaTensor*>& ln_scale,
