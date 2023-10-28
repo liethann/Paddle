@@ -1195,8 +1195,8 @@ void FusedMultiTransformerInferMeta(
     const std::vector<const MetaTensor*>& ln_biases,
     const std::vector<const MetaTensor*>& qkv_weights,
     const std::vector<const MetaTensor*>& qkv_biases,
-    const std::vector<const MetaTensor*>& linear_weights,
-    const std::vector<const MetaTensor*>& linear_biases,
+    const std::vector<const MetaTensor*>& out_linear_weights,
+    const std::vector<const MetaTensor*>& out_linear_biases,
     const std::vector<const MetaTensor*>& ffn_ln_scales,
     const std::vector<const MetaTensor*>& ffn_ln_biases,
     const std::vector<const MetaTensor*>& ffn1_weights,
@@ -1218,17 +1218,17 @@ void FusedMultiTransformerInferMeta(
     const std::string& dropout_implementation,
     bool trans_qkvw,
     int ring_id,
-    std::vector<MetaTensor*> cache_kv_outs,
+    std::vector<MetaTensor*> cache_kvs_out,
     MetaTensor* out) {
   out->set_dims(x.dims());
   out->set_dtype(x.dtype());
 
   for (size_t i = 0; i < cache_kvs.size(); i++) {
-    if (cache_kv_outs[i] != nullptr) {
-      cache_kv_outs[i]->set_dims(cache_kvs[i]->dims());
-      cache_kv_outs[i]->share_lod(*cache_kvs[i]);
-      if (!(cache_kv_outs[i]->is_same_tensor(*cache_kvs[i]))) {
-        cache_kv_outs[i]->set_dtype(cache_kvs[i]->dtype());
+    if (cache_kvs_out[i] != nullptr) {
+      cache_kvs_out[i]->set_dims(cache_kvs[i]->dims());
+      cache_kvs_out[i]->share_lod(*cache_kvs[i]);
+      if (!(cache_kvs_out[i]->is_same_tensor(*cache_kvs[i]))) {
+        cache_kvs_out[i]->set_dtype(cache_kvs[i]->dtype());
       }
     }
   }

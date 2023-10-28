@@ -1114,7 +1114,7 @@ def fused_multi_transformer(
         if qkv_biases is not None:
             inputs['QKVBiases'] = qkv_biases
 
-        inputs['OutLinearW'] = linear_weights
+        inputs['OutLinearWeights'] = linear_weights
         if linear_biases is not None:
             inputs['OutLinearBias'] = linear_biases
 
@@ -1155,7 +1155,7 @@ def fused_multi_transformer(
         outputs['Out'] = final_out
         if cache_kvs:
             # NOTE: inplace
-            outputs['CacheKVOut'] = cache_kvs
+            outputs['CacheKVsOut'] = cache_kvs
 
         helper.append_op(
             type='fused_multi_transformer',

@@ -26,8 +26,8 @@ void FusedMultiTransformerKernel(
     const std::vector<const DenseTensor *> &ln_biases,
     const std::vector<const DenseTensor *> &qkv_weights,
     const std::vector<const DenseTensor *> &qkv_biases,
-    const std::vector<const DenseTensor *> &linear_weights,
-    const std::vector<const DenseTensor *> &linear_biases,
+    const std::vector<const DenseTensor *> &out_linear_weights,
+    const std::vector<const DenseTensor *> &out_linear_biases,
     const std::vector<const DenseTensor *> &ffn_ln_scales,
     const std::vector<const DenseTensor *> &ffn_ln_biases,
     const std::vector<const DenseTensor *> &ffn1_weights,
@@ -49,7 +49,7 @@ void FusedMultiTransformerKernel(
     const std::string &dropout_implementation,
     bool trans_qkvw,
     int ring_id,
-    std::vector<const DenseTensor *> cache_kv_outs,
+    std::vector<DenseTensor *> cache_kvs_out,
     DenseTensor *out);
 
 }  // namespace phi

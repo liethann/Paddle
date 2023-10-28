@@ -102,8 +102,8 @@ void FusedMultiTransformerInferMeta(
     const std::vector<const MetaTensor*>& ln_biases,
     const std::vector<const MetaTensor*>& qkv_weights,
     const std::vector<const MetaTensor*>& qkv_biases,
-    const std::vector<const MetaTensor*>& linear_weights,
-    const std::vector<const MetaTensor*>& linear_biases,
+    const std::vector<const MetaTensor*>& out_linear_weights,
+    const std::vector<const MetaTensor*>& out_linear_biases,
     const std::vector<const MetaTensor*>& ffn_ln_scales,
     const std::vector<const MetaTensor*>& ffn_ln_biases,
     const std::vector<const MetaTensor*>& ffn1_weights,
@@ -125,7 +125,7 @@ void FusedMultiTransformerInferMeta(
     const std::string& dropout_implementation,
     bool trans_qkvw,
     int ring_id,
-    std::vector<MetaTensor*> cache_kv_outs,
+    std::vector<MetaTensor*> cache_kvs_out,
     MetaTensor* out);
 
 void GenerateSequenceXPUInferMeta(const MetaTensor& x,

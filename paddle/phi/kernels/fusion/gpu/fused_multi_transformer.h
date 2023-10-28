@@ -19,16 +19,18 @@ limitations under the License. */
 
 #pragma once
 
-#include <cuda_fp16.h>
 #include <float.h>
 
 #include <cub/cub.cuh>
-
 #include "paddle/fluid/distributed/collective/utils.h"
 #include "paddle/phi/api/include/tensor.h"
 #include "paddle/phi/backends/dynload/cublasLt.h"
 #include "paddle/phi/backends/gpu/gpu_device_function.h"
 #include "paddle/phi/backends/gpu/gpu_dnn.h"
+#include "paddle/phi/common/data_type.h"
+#include "paddle/phi/common/float16.h"
+#include "paddle/phi/common/memory_utils.h"
+#include "paddle/phi/core/allocator.h"
 #include "paddle/phi/core/distributed/comm_context_manager.h"
 #include "paddle/phi/core/flags.h"
 #include "paddle/phi/kernels/funcs/fused_gemm_epilogue.h"
@@ -37,7 +39,6 @@ limitations under the License. */
 #include "paddle/phi/kernels/fusion/gpu/attn_gemm.h"
 #include "paddle/phi/kernels/fusion/gpu/fmha_ref.h"
 #include "paddle/phi/kernels/fusion/gpu/fused_dropout_helper.h"
-
 // #if defined(PADDLE_WITH_NCCL) || defined(PADDLE_WITH_RCCL)
 // #include "paddle/fluid/distributed/collective/process_group.h"
 // #include "paddle/fluid/platform/collective_helper.h"
@@ -49,8 +50,8 @@ limitations under the License. */
 
 PHI_DECLARE_bool(gemm_use_half_precision_compute_type);
 
-namespace paddle {
-namespace operators {
+namespace phi {
+namespace fusion {
 
 // for debug
 // #define _DEBUG_FUSED_MULTI_TRANSFORMER
@@ -132,9 +133,9 @@ namespace operators {
 
 namespace {  // NOLINT
 
-namespace plat = paddle::platform;
-using float16 = plat::float16;
-
+// namespace plat = paddle::platform;
+// using float16 = plat::float16;
+using float16 = dtype::float16;
 #define MMHA_USE_FP32_ACUM_FOR_LOGITS
 #define MMHA_USE_FP32_ACUM_FOR_OUT
 #define MMHA_USE_FP32_ACUM_FOR_FMA
@@ -713,13 +714,13 @@ struct Qk_dot<float16, 4> {
   }
 };
 
-template <int WARPS_PER_BLOCK, int WARP_SIZE = 32>
+template <int WARPS_PER_BLOCK, int WARPS_SIZE = 32>
 inline __device__ float block_sum(float *red_smem, float sum) {
-  int warp = threadIdx.x / WARP_SIZE;
-  int lane = threadIdx.x % WARP_SIZE;
+  int warp = threadIdx.x / WARPS_SIZE;
+  int lane = threadIdx.x % WARPS_SIZE;
 
 #pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= 1; mask /= 2) {
+  for (int mask = WARPS_SIZE / 2; mask >= 1; mask /= 2) {
     sum += __shfl_xor_sync(uint32_t(-1), sum, mask);
   }
 
@@ -748,9 +749,9 @@ inline __device__ void convert_from_float(float4 &dst, float4 src) {  // NOLINT
   dst = src;
 }
 
-inline __device__ void convert_from_float(plat::float16 &dst,  // NOLINT
+inline __device__ void convert_from_float(dtype::float16 &dst,  // NOLINT
                                           float src) {
-  dst = static_cast<plat::float16>(src);
+  dst = static_cast<dtype::float16>(src);
 }
 
 inline __device__ void convert_from_float(uint4 &dst, Float8_ src) {  // NOLINT
@@ -791,8 +792,8 @@ __global__ void masked_multihead_attention_kernel(
   static_assert(Dh_MAX % THREADS_PER_KEY == 0, "");
   static_assert(Dh_MAX % THREADS_PER_VALUE == 0, "");
 
-  constexpr int WARP_SIZE = 32;
-  constexpr int WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARP_SIZE;
+  constexpr int WARPS_SIZE = 32;
+  constexpr int WARPS_PER_BLOCK = THREADS_PER_BLOCK / WARPS_SIZE;
 
   extern __shared__ char smem_[];
 
@@ -946,16 +947,16 @@ __global__ void masked_multihead_attention_kernel(
 
     qk = dot<Qk_vec, Qk_vec>(q, k);
 
-    if (QK_VECS_PER_WARP <= WARP_SIZE) {
+    if (QK_VECS_PER_WARP <= WARPS_SIZE) {
 #pragma unroll
       for (int mask = QK_VECS_PER_WARP / 2; mask >= 1; mask /= 2) {
         qk += __shfl_xor_sync(shfl_mask(QK_VECS_PER_WARP), qk, mask);
       }
     }
   }
-  if (QK_VECS_PER_WARP > WARP_SIZE) {
+  if (QK_VECS_PER_WARP > WARPS_SIZE) {
     constexpr int WARPS_PER_RED =
-        (QK_VECS_PER_WARP + WARP_SIZE - 1) / WARP_SIZE;
+        (QK_VECS_PER_WARP + WARPS_SIZE - 1) / WARPS_SIZE;
     qk = block_sum<WARPS_PER_RED>(&red_smem[WARPS_PER_RED], qk);
   }
   if (tid == 0) {
@@ -996,7 +997,7 @@ __global__ void masked_multihead_attention_kernel(
   }
 
   constexpr int K_PER_ITER = THREADS_PER_BLOCK / THREADS_PER_KEY;
-  constexpr int K_PER_WARP = WARP_SIZE / THREADS_PER_KEY;
+  constexpr int K_PER_WARP = WARPS_SIZE / THREADS_PER_KEY;
 
   T *k_cache = &params.cache_kv[bhi * params.max_seq_length * Dh + ki];
   int ti_end = div_up(act_time_step, K_PER_WARP) * K_PER_WARP;
@@ -1033,12 +1034,12 @@ __global__ void masked_multihead_attention_kernel(
   }
 
 #pragma unroll
-  for (int mask = WARP_SIZE / 2; mask >= THREADS_PER_KEY; mask /= 2) {
+  for (int mask = WARPS_SIZE / 2; mask >= THREADS_PER_KEY; mask /= 2) {
     qk_max = fmaxf(qk_max, __shfl_xor_sync(uint32_t(-1), qk_max, mask));
   }
 
-  const int warp = tid / WARP_SIZE;
-  const int lane = tid % WARP_SIZE;
+  const int warp = tid / WARPS_SIZE;
+  const int lane = tid % WARPS_SIZE;
 
   if (lane == 0) {
     red_smem[warp] = qk_max;
@@ -1310,8 +1311,8 @@ void fmha(const phi::GPUContext &dev_ctx,
       fmha_launch_kernel<T, 192, 256>(params, dev_ctx.stream());
       break;
     default:
-      PADDLE_THROW(platform::errors::Unimplemented(
-          "Dim_head = %d is unsupport!", dim_head));
+      PADDLE_THROW(
+          phi::errors::Unimplemented("Dim_head = %d is unsupport!", dim_head));
   }
 }
 
@@ -1431,7 +1432,7 @@ void write_cache_kv(const phi::GPUContext &dev_ctx,
   PADDLE_ENFORCE_EQ(
       dim_head % x,
       0,
-      platform::errors::PreconditionNotMet(
+      phi::errors::PreconditionNotMet(
           "dim_head=%d must be divisible by vec_size=%d", dim_head, x));
 
   int max_size = max_seq_len * dim_head / x;
@@ -1548,7 +1549,7 @@ void qkv_bias_add_transpose_split(const phi::GPUContext &dev_ctx,
   constexpr int PackSize = VEC_16B / sizeof(T);
   PADDLE_ENFORCE_EQ(size_per_head % PackSize,
                     0,
-                    platform::errors::PreconditionNotMet(
+                    phi::errors::PreconditionNotMet(
                         "dim_head=%d must be divisible by vec_size=%d",
                         size_per_head,
                         PackSize));
@@ -1711,12 +1712,12 @@ void InvokeGetPaddingOffset(const phi::GPUContext &dev_ctx,
                             const int max_seq_len) {
   GetPaddingOffset<<<1, 1, 0, dev_ctx.stream()>>>(
       d_token_num, padding_offset, sequence_lengths, batch_size, max_seq_len);
-  memory::Copy(platform::CPUPlace(),
-               h_token_num,
-               dev_ctx.GetPlace(),
-               d_token_num,
-               sizeof(int),
-               dev_ctx.stream());
+  memory_utils::Copy(phi::CPUPlace(),
+                     h_token_num,
+                     dev_ctx.GetPlace(),
+                     d_token_num,
+                     sizeof(int),
+                     dev_ctx.stream());
 }
 
 template <typename T>
@@ -1785,7 +1786,7 @@ class CublasFusedMLP {
     cudaDataType_t mat_type = CUDA_R_32F;
     cudaDataType_t scale_type = CUDA_R_32F;
     cublasComputeType_t compute_type = CUBLAS_COMPUTE_32F;
-    if (std::is_same<T, paddle::platform::float16>::value) {
+    if (std::is_same<T, dtype::float16>::value) {
       mat_type = CUDA_R_16F;
       if (FLAGS_gemm_use_half_precision_compute_type) {
         // This option default value is true, it tends to result NaN, but get
@@ -1795,7 +1796,7 @@ class CublasFusedMLP {
         scale_type = CUDA_R_16F;
       }
     }
-    if (std::is_same<T, platform::bfloat16>::value) {
+    if (std::is_same<T, dtype::bfloat16>::value) {
       mat_type = CUDA_R_16BF;
     }
     if (std::is_same<T, double>::value) {
@@ -1804,24 +1805,24 @@ class CublasFusedMLP {
       compute_type = CUBLAS_COMPUTE_64F;
     }
 
-    PADDLE_ENFORCE_GPU_SUCCESS(platform::dynload::cublasLtMatmulDescCreate(
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmulDescCreate(
         &operation_desc_, compute_type, scale_type));
-    PADDLE_ENFORCE_GPU_SUCCESS(platform::dynload::cublasLtMatrixLayoutCreate(
-        &x_desc_, mat_type, 1, 1, 1));
-    PADDLE_ENFORCE_GPU_SUCCESS(platform::dynload::cublasLtMatrixLayoutCreate(
-        &w_desc_, mat_type, 1, 1, 1));
-    PADDLE_ENFORCE_GPU_SUCCESS(platform::dynload::cublasLtMatrixLayoutCreate(
+    PADDLE_ENFORCE_GPU_SUCCESS(
+        phi::dynload::cublasLtMatrixLayoutCreate(&x_desc_, mat_type, 1, 1, 1));
+    PADDLE_ENFORCE_GPU_SUCCESS(
+        phi::dynload::cublasLtMatrixLayoutCreate(&w_desc_, mat_type, 1, 1, 1));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatrixLayoutCreate(
         &out_desc_, mat_type, 1, 1, 1));
   }
   ~CublasFusedMLP() {
     PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmulDescDestroy(operation_desc_));
+        phi::dynload::cublasLtMatmulDescDestroy(operation_desc_));
     PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutDestroy(x_desc_));
+        phi::dynload::cublasLtMatrixLayoutDestroy(x_desc_));
     PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutDestroy(w_desc_));
+        phi::dynload::cublasLtMatrixLayoutDestroy(w_desc_));
     PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutDestroy(out_desc_));
+        phi::dynload::cublasLtMatrixLayoutDestroy(out_desc_));
   }
 
   void Setup(const phi::DDim &x_shape,
@@ -1834,18 +1835,16 @@ class CublasFusedMLP {
 
     cublasOperation_t cublas_transA = trans_x ? CUBLAS_OP_T : CUBLAS_OP_N;
     cublasOperation_t cublas_transB = trans_w ? CUBLAS_OP_T : CUBLAS_OP_N;
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmulDescSetAttribute(
-            operation_desc_,
-            CUBLASLT_MATMUL_DESC_TRANSB,
-            &cublas_transA,
-            sizeof(cublas_transA)));
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmulDescSetAttribute(
-            operation_desc_,
-            CUBLASLT_MATMUL_DESC_TRANSA,
-            &cublas_transB,
-            sizeof(cublas_transB)));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmulDescSetAttribute(
+        operation_desc_,
+        CUBLASLT_MATMUL_DESC_TRANSB,
+        &cublas_transA,
+        sizeof(cublas_transA)));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmulDescSetAttribute(
+        operation_desc_,
+        CUBLASLT_MATMUL_DESC_TRANSA,
+        &cublas_transB,
+        sizeof(cublas_transB)));
 
     SetCublasMatrixLayout(x_desc_, trans_x, M, K);
     SetCublasMatrixLayout(w_desc_, trans_w, K, N);
@@ -1867,27 +1866,25 @@ class CublasFusedMLP {
     if (add_bias) {
       bias_data = bias->data<T>();
     }
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmulDescSetAttribute(
-            operation_desc_,
-            CUBLASLT_MATMUL_DESC_BIAS_POINTER,
-            &bias_data,
-            sizeof(bias_data)));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmulDescSetAttribute(
+        operation_desc_,
+        CUBLASLT_MATMUL_DESC_BIAS_POINTER,
+        &bias_data,
+        sizeof(bias_data)));
 
     cublasLtEpilogue_t epiloque_func = GetEpilogueType(activation, add_bias);
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmulDescSetAttribute(
-            operation_desc_,
-            CUBLASLT_MATMUL_DESC_EPILOGUE,
-            &epiloque_func,
-            sizeof(epiloque_func)));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmulDescSetAttribute(
+        operation_desc_,
+        CUBLASLT_MATMUL_DESC_EPILOGUE,
+        &epiloque_func,
+        sizeof(epiloque_func)));
 
     T *residual_data = add_residual ? residual->data<T>() : out_data;
 
     cublasLtHandle_t lt_handle = dev_ctx_.cublaslt_handle();
     size_t workspace_size = static_cast<size_t>(4) * 1024 * 1024;
     cudaStream_t stream = dev_ctx_.stream();
-    memory::allocation::AllocationPtr workspace = memory::Alloc(
+    phi::Allocator::AllocationPtr workspace = phi::memory_utils::Alloc(
         dev_ctx_.GetPlace(),
         workspace_size,
         phi::Stream(reinterpret_cast<phi::StreamId>(dev_ctx_.stream())));
@@ -1906,7 +1903,7 @@ class CublasFusedMLP {
       beta = &beta64;
     }
 
-    if (std::is_same<T, phi::dtype::float16>::value &&
+    if (std::is_same<T, dtype::float16>::value &&
         FLAGS_gemm_use_half_precision_compute_type) {
       alpha = &alpha16;
       beta = &beta16;
@@ -1930,23 +1927,22 @@ class CublasFusedMLP {
         workspace->ptr(),
         workspace_size);
 
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatmul(lt_handle,
-                                          operation_desc_,
-                                          alpha,
-                                          w_data,
-                                          w_desc_,
-                                          x_data,
-                                          x_desc_,
-                                          beta,
-                                          residual_data,
-                                          out_desc_,
-                                          out_data,
-                                          out_desc_,
-                                          algo,
-                                          workspace->ptr(),
-                                          workspace_size,
-                                          stream));
+    PADDLE_ENFORCE_GPU_SUCCESS(phi::dynload::cublasLtMatmul(lt_handle,
+                                                            operation_desc_,
+                                                            alpha,
+                                                            w_data,
+                                                            w_desc_,
+                                                            x_data,
+                                                            x_desc_,
+                                                            beta,
+                                                            residual_data,
+                                                            out_desc_,
+                                                            out_data,
+                                                            out_desc_,
+                                                            algo,
+                                                            workspace->ptr(),
+                                                            workspace_size,
+                                                            stream));
   }
 
  private:
@@ -1974,7 +1970,7 @@ class CublasFusedMLP {
       PADDLE_ENFORCE_EQ(
           true,
           false,
-          platform::errors::InvalidArgument(
+          phi::errors::InvalidArgument(
               "The activation attribute of fused_gemm_epilogue op should be"
               " one of {\"none\", \"relu\", \"gelu\"}. But received %s."
               "But received activation=%s.",
@@ -1987,42 +1983,32 @@ class CublasFusedMLP {
                              const uint64_t cublas_row,
                              const uint64_t cublas_col) {
     cudaDataType_t mat_type = CUDA_R_32F;
-    if (std::is_same<T, paddle::platform::float16>::value) {
+    if (std::is_same<T, dtype::float16>::value) {
       mat_type = CUDA_R_16F;
     }
-    if (std::is_same<T, platform::bfloat16>::value) {
+    if (std::is_same<T, dtype::bfloat16>::value) {
       mat_type = CUDA_R_16BF;
     }
     if (std::is_same<T, double>::value) {
       mat_type = CUDA_R_64F;
     }
 
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutSetAttribute(
-            layout_desc,
-            CUBLASLT_MATRIX_LAYOUT_TYPE,
-            &mat_type,
-            sizeof(mat_type)));
+    PADDLE_ENFORCE_GPU_SUCCESS(dynload::cublasLtMatrixLayoutSetAttribute(
+        layout_desc, CUBLASLT_MATRIX_LAYOUT_TYPE, &mat_type, sizeof(mat_type)));
 
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutSetAttribute(
-            layout_desc,
-            CUBLASLT_MATRIX_LAYOUT_ROWS,
-            transpose ? &cublas_row : &cublas_col,
-            sizeof(cublas_row)));
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutSetAttribute(
-            layout_desc,
-            CUBLASLT_MATRIX_LAYOUT_COLS,
-            transpose ? &cublas_col : &cublas_row,
-            sizeof(cublas_col)));
+    PADDLE_ENFORCE_GPU_SUCCESS(dynload::cublasLtMatrixLayoutSetAttribute(
+        layout_desc,
+        CUBLASLT_MATRIX_LAYOUT_ROWS,
+        transpose ? &cublas_row : &cublas_col,
+        sizeof(cublas_row)));
+    PADDLE_ENFORCE_GPU_SUCCESS(dynload::cublasLtMatrixLayoutSetAttribute(
+        layout_desc,
+        CUBLASLT_MATRIX_LAYOUT_COLS,
+        transpose ? &cublas_col : &cublas_row,
+        sizeof(cublas_col)));
     int64_t cublas_ld = transpose ? cublas_row : cublas_col;
-    PADDLE_ENFORCE_GPU_SUCCESS(
-        platform::dynload::cublasLtMatrixLayoutSetAttribute(
-            layout_desc,
-            CUBLASLT_MATRIX_LAYOUT_LD,
-            &cublas_ld,
-            sizeof(cublas_ld)));
+    PADDLE_ENFORCE_GPU_SUCCESS(dynload::cublasLtMatrixLayoutSetAttribute(
+        layout_desc, CUBLASLT_MATRIX_LAYOUT_LD, &cublas_ld, sizeof(cublas_ld)));
   }
 
   const phi::GPUContext &dev_ctx_;
@@ -2036,5 +2022,5 @@ class CublasFusedMLP {
 
 }  // namespace
 
-}  // namespace operators
-}  // namespace paddle
+}  // namespace fusion
+}  // namespace phi
